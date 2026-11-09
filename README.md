@@ -51,9 +51,38 @@ bun run dev          # http://localhost:3000
 
 ## النشر على Vercel
 
-1. اربط المستودع على Vercel.
-2. أضف متغيرات البيئة الثلاثة (`TURSO_DATABASE_URL`، `TURSO_AUTH_TOKEN`، `MERGER_API_BASE`).
-3. Deploy — كل الاتصالات عبر HTTP (مناسب للـ serverless) ولا يوجد أي ملف محلي.
+1. اربط المستودع على Vercel (Import Git Repository).
+2. أضف متغيرات البيئة من **Settings → Environment Variables** (انظر الجدول أعلاه):
+   - `TURSO_DATABASE_URL` و `TURSO_AUTH_TOKEN` إلزاميان.
+   - `MERGER_API_BASE` اختياري عمليًا: بدونه كل شيء يعمل عادي ما عدا أداة `merge_videos` التي تعيد رسالة عربية واضحة بأن الخدمة غير مهيأة.
+   - `MCP_ACCESS_TOKEN` اختياري لحماية `/mcp`.
+3. **مفاتيح التوليد (kie.ai / CometAPI) لا تُضاف إلى Vercel** — تُضاف من لوحة الإدارة بعد النشر (قسم «مدير المفاتيح»).
+4. Deploy. لا يوجد أي ملف محلي — كل الاتصالات HTTP (Turso + المزودون + خدمة الدمج).
+
+### ملاحظات نشر مهمة
+
+- **`maxDuration = 300`** مضبوط على مسار `/mcp`: نافذة الانتظار القصوى للأدوات 240 ثانية. إن رفضته خطتك، خفّضه إلى 60 — المهمة تبقى محفوظة في Turso وتكتمل عبر `get_task` حتى لو انتهت مدة الدالة.
+- يُفضَّل ضبط Region للدوال قريبًا من قاعدة Turso (مثلاً `fra1` لقاعدة `aws-eu-west-1`) لتقليل زمن الاستجابة.
+- **توليد الفيديو أغلى من الصور** في kie.ai: إن لم يكن الرصيد كافيًا تبقى المهمة `processing` («بانتظار توفر مفتاح صالح…») وتُعاد محاولتها تلقائيًا مع كل `get_task` بعد شحن الرصيد أو إضافة مفتاح آخر.
+- أضف عدة مفاتيح لكل مزود من لوحة الإدارة — التجربة تسلسلية مع تبديل فوري عند أي خطأ.
+
+## التشغيل محليًا
+
+```bash
+bun install
+bun run dev          # http://localhost:3000
+```
+
+انسخ `.env.example` إلى `.env.local` واملأ القيم. الجداول تُنشأ تلقائيًا عند أول وصول (`CREATE TABLE IF NOT EXISTS`) — لا migrations.
+
+## اختبارات جاهزة
+
+```bash
+bash scripts/mcp-test.sh init                      # initialize + جلسة
+bash scripts/mcp-test.sh tools                     # tools/list
+bash scripts/mcp-test.sh calltool generate_image '{"prompt":"قطة فضائية","wait_seconds":90}'
+node scripts/e2e-test.mjs all                      # صورة + فيديو + رسائل الأخطاء العربية
+```
 
 ## قواعد جوهرية
 

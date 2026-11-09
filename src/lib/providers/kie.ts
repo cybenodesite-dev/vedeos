@@ -101,11 +101,15 @@ export const kieAdapter: ProviderAdapter = {
     const progress = typeof d.progress === "number" && d.progress > 0 ? Math.min(100, d.progress) : stateProgress[state] ?? 30;
 
     if (state === "success") {
-      // resultJson نص JSON داخل JSON — يحتاج JSON.parse ثانيًا (لا تخترع حقولًا)
+      // resultJson نص JSON قد يكون مُرمّزًا مرتين — نحلّل دفاعيًا حتى مرتين (لا تخترع حقولًا)
       let urls: string[] = [];
       try {
-        const parsed = JSON.parse(d.resultJson ?? "{}") as { resultUrls?: string[] };
-        urls = Array.isArray(parsed.resultUrls) ? parsed.resultUrls.filter((u) => typeof u === "string") : [];
+        let parsed: unknown = JSON.parse(d.resultJson ?? "{}");
+        if (typeof parsed === "string") parsed = JSON.parse(parsed);
+        const obj = parsed as { resultUrls?: unknown; data?: { resultUrls?: unknown } };
+        const raw = obj?.resultUrls ?? obj?.data?.resultUrls ?? [];
+        const list = Array.isArray(raw) ? raw : [raw];
+        urls = list.filter((u): u is string => typeof u === "string" && /^https?:\/\//.test(u));
       } catch {
         urls = [];
       }

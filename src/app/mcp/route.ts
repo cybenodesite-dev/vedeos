@@ -10,10 +10,15 @@
  * مصادقة اختيارية: إن ضُبط MCP_ACCESS_TOKEN يُطلب Authorization: Bearer <token>.
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { createMcpServer } from "@/mcp/server";
+import { createMcpServer, TOOL_NAMES } from "@/mcp/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/**
+ * أقصى مدة تنفيذ على Vercel — نافذة الانتظار القصوى للأدوات 240 ثانية + هامش.
+ * إن رفضتها خطتك خفّضها إلى 60 — المهمة تبقى محفوظة في Turso وتُستكمل عبر get_task.
+ */
+export const maxDuration = 300;
 
 interface SessionPair {
   server: ReturnType<typeof createMcpServer>;
@@ -90,6 +95,35 @@ async function handleMcp(request: Request): Promise<Response> {
   const sessionId = request.headers.get("mcp-session-id");
 
   if (request.method === "POST") {
+    // فحص الأداة المجهولة قبل تمرير الجسم للـ transport — رسالة عربية صريحة بدل خطأ إنجليزي
+    try {
+      const peek = (await request.clone().json()) as {
+        method?: string;
+        id?: unknown;
+        params?: { name?: string };
+      };
+      if (peek?.method === "tools/call" && !TOOL_NAMES.includes(peek.params?.name ?? "")) {
+        const name = peek.params?.name ?? "(فارغ)";
+        const body = JSON.stringify({
+          jsonrpc: "2.0",
+          id: peek.id ?? null,
+          result: {
+            content: [{ type: "text", text: `❌ أداة غير معروفة: ${name}. المتاح: ${TOOL_NAMES.join("، ")}` }],
+            isError: true,
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+          },
+        });
+      }
+    } catch {
+      /* ليس JSON أو تعذر القراءة — الـ transport سيتعامل معه */
+    }
+
     if (sessionId) {
       const pair = sessions.get(sessionId);
       if (!pair) {
@@ -131,4 +165,18 @@ export async function GET(request: Request): Promise<Response> {
 }
 export async function DELETE(request: Request): Promise<Response> {
   return handleMcp(request);
+}
+
+/** CORS للعملاء القائمين على المتصفح — لا يحتاجه العملاء الخادمية لكنه لا يضر */
+export async function OPTIONS(): Promise<Response> {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version",
+      "Access-Control-Expose-Headers": "Mcp-Session-Id",
+      "Access-Control-Max-Age": "86400",
+    },
+  });
 }

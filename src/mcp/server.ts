@@ -23,6 +23,9 @@ import {
 
 export const SERVER_INFO = { name: "media-generator-mcp", version: "1.2.0" } as const;
 
+/** أسماء الأدوات الخمس — تُستخدم لرسالة «أداة غير معروفة» العربية في مسار /mcp */
+export const TOOL_NAMES: readonly string[] = ["generate_image", "generate_video", "merge_videos", "get_task", "list_media"];
+
 /** نص التعليمات الجاهز المُرسل مع initialize */
 export const SERVER_INSTRUCTIONS = `AI media generation server (kie.ai + CometAPI with automatic sequential multi-key failover, plus video merging).
 Workflow: call generate_image or generate_video. If the response contains finished URLs, show them to the user.
@@ -169,21 +172,21 @@ export function createMcpServer(): McpServer {
         "Accepts 2 to 10 clips. Merging is usually fast: short wait with live progress streaming, then a merge task_id — track it with get_task. " +
         "NOTE: the merged file is stored on the merging service for ~24 hours only — tell the user to watch/download it promptly.",
       inputSchema: {
+        // الحد الأدنى/الأقصى الكلي (2..10) يُفحص في runMerge برسائل عربية —
+        // حتى يُسمح بمزيج urls + task_ids مثل رابط واحد + مهمتين مكتملتين
         urls: z
           .array(z.string())
-          .min(2, "❌ الدمج يحتاج مقطعَين على الأقل. مرّر urls (روابط مباشرة) أو task_ids لمهام مكتملة.")
-          .max(10, "❌ أقصى عدد مقاطع للدمج هو 10 (خدمة الدمج تقبل 10 مقاطع كحد أقصى).")
+          .max(20, "عدد الروابط كبير جدًا")
           .optional()
           .describe(
-            "Public direct video URLs (http/https) in merge order — the first clip starts the final video. 2 to 10 clips."
+            "Public direct video URLs (http/https) in merge order — the first clip starts the final video. 2 to 10 clips total."
           ),
         task_ids: z
           .array(z.string())
-          .min(2, "❌ الدمج يحتاج مقطعَين على الأقل. مرّر urls (روابط مباشرة) أو task_ids لمهام مكتملة.")
-          .max(10, "❌ أقصى عدد مقاطع للدمج هو 10 (خدمة الدمج تقبل 10 مقاطع كحد أقصى).")
+          .max(20, "عدد المعرفات كبير جدًا")
           .optional()
           .describe(
-            "Alternative to urls: task_ids of COMPLETED video generation tasks — their result URLs are merged in this order. 2 to 10 ids."
+            "Alternative/complement to urls: task_ids of COMPLETED video generation tasks — their result URLs are merged in this order. 2 to 10 clips total."
           ),
         wait_seconds: z.number().int().min(0).max(240).default(60),
       },

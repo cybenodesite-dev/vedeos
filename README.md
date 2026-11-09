@@ -11,7 +11,7 @@
 
 ## خادم MCP
 
-المسار: `/mcp` (نقل Streamable HTTP الرسمي عبر `@modelcontextprotocol/sdk`).
+المسار: `/mcp` (نقل Streamable HTTP الرسمي عبر `@modelcontextprotocol/sdk`) — **وضع stateless**: يُبنى خادم جديد لكل طلب، لا توجد جلسات في الذاكرة، لذا يعمل بلا مشاكل على Vercel والمنصات اللاخادمية (تجاهل ترويسة `mcp-session-id` طبيعي ومطابق للنمط الرسمي من SDK).
 
 الأدوات الخمس: `generate_image` · `generate_video` · `merge_videos` · `get_task` · `list_media`
 
@@ -78,7 +78,7 @@ bun run dev          # http://localhost:3000
 ## اختبارات جاهزة
 
 ```bash
-bash scripts/mcp-test.sh init                      # initialize + جلسة
+bash scripts/mcp-test.sh init                      # initialize (وضع stateless — بلا جلسة)
 bash scripts/mcp-test.sh tools                     # tools/list
 bash scripts/mcp-test.sh calltool generate_image '{"prompt":"قطة فضائية","wait_seconds":90}'
 node scripts/e2e-test.mjs all                      # صورة + فيديو + رسائل الأخطاء العربية

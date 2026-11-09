@@ -1,11 +1,16 @@
 /**
  * خادم MCP على المسار /mcp — نقل Streamable HTTP حسب مواصفة MCP.
- * يستخدم WebStandardStreamableHTTPServerTransport الرسمي من SDK (يعمل مباشرة بـ
- * Web Request/Response في Next.js App Router — بلا تحويل يدوي لـ JSON-RPC).
+ * يستخدم WebStandardStreamableHTTPServerTransport الرسمي من SDK بوضع **stateless**:
+ * يُنشأ زوج (McpServer + Transport) جديد لكل طلب — هذا هو النمط الرسمي الموصى به
+ * للمنصات اللاخادمية (Vercel / Cloudflare Workers) حيث لا تضمن المنصة نفس العملية
+ * بين الطلبات المتتالية؛ فلا توجد جلسات في الذاكرة تضيع بين instance وآخر
+ * (يست eliminate خطأ "Session not found" نهائيًا).
  *
  * POST: رسائل JSON-RPC (initialize / tools/list / tools/call ...)
- * GET : بث SSE مستقل للرسائل التي يبدأها السيرفر (يتطلب جلسة قائمة)
- * DELETE: إنهاء الجلسة
+ *       كل رسالة تُعالج باستقلال تام، وترويسة mcp-session-id الواردة تُتجاهل (بلا جلسات).
+ * GET : 405 — البث المستقل من السيرفر غير متاح في وضع stateless (أدواتنا تعيد
+ *       النتيجة والتقدم داخل استجابة POST نفسها عبر _meta.progressToken).
+ * DELETE: 405 — لا توجد جلسة في الذاكرة ليتم إنهاؤها.
  *
  * مصادقة اختيارية: إن ضُبط MCP_ACCESS_TOKEN يُطلب Authorization: Bearer <token>.
  */
@@ -20,17 +25,6 @@ export const dynamic = "force-dynamic";
  */
 export const maxDuration = 300;
 
-interface SessionPair {
-  server: ReturnType<typeof createMcpServer>;
-  transport: WebStandardStreamableHTTPServerTransport;
-  lastUsed: number;
-}
-
-/** جلسات حية في الذاكرة (كل عملية serverless لها خريطتها) */
-const g = globalThis as unknown as { __mcpSessions?: Map<string, SessionPair> };
-const sessions: Map<string, SessionPair> = (g.__mcpSessions ??= new Map());
-const MAX_SESSIONS = 100;
-
 function jsonError(status: number, code: number, message: string): Response {
   return new Response(
     JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null }),
@@ -38,51 +32,46 @@ function jsonError(status: number, code: number, message: string): Response {
   );
 }
 
-/** إنشاء زوج (server + transport) جديد بوضع stateful */
-function createSession(): SessionPair {
-  const pair: SessionPair = {
-    server: null as unknown as SessionPair["server"],
-    transport: null as unknown as WebStandardStreamableHTTPServerTransport,
-    lastUsed: Date.now(),
-  };
+/**
+ * معالجة POST بوضع stateless: زوج جديد لكل طلب — نمط SDK الرسمي
+ * ("Stateless transport cannot be reused across requests. Create a new transport per request.")
+ */
+async function handlePost(request: Request): Promise<Response> {
+  // فحص الأداة المجهولة قبل تمرير الجسم للـ transport — رسالة عربية صريحة بدل خطأ إنجليزي
+  try {
+    const peek = (await request.clone().json()) as {
+      method?: string;
+      id?: unknown;
+      params?: { name?: string };
+    };
+    if (peek?.method === "tools/call" && !TOOL_NAMES.includes(peek.params?.name ?? "")) {
+      const name = peek.params?.name ?? "(فارغ)";
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: peek.id ?? null,
+          result: {
+            content: [{ type: "text", text: `❌ أداة غير معروفة: ${name}. المتاح: ${TOOL_NAMES.join("، ")}` }],
+            isError: true,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+  } catch {
+    /* ليس JSON أو تعذر القراءة — الـ transport سيتعامل معه */
+  }
+
+  // زوج جديد لكل طلب — بلا جلسات في الذاكرة، والطلبات مستقلة تمامًا
   const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID(),
-    onsessioninitialized: (sessionId) => {
-      pair.lastUsed = Date.now();
-      sessions.set(sessionId, pair);
-      evictIfNeeded();
-    },
-    onsessionclosed: (sessionId) => {
-      sessions.delete(sessionId);
-    },
+    sessionIdGenerator: undefined,
   });
   const server = createMcpServer();
-  pair.server = server;
-  pair.transport = transport;
-  // connect ضروري قبل معالجة أي طلب (نمط SDK الرسمي)
-  void server.connect(transport);
-  return pair;
+  await server.connect(transport);
+  return transport.handleRequest(request);
 }
 
-/** حصر حجم خريطة الجلسات — أغلق الأقدم عند التجاوز */
-function evictIfNeeded(): void {
-  while (sessions.size > MAX_SESSIONS) {
-    let oldestKey: string | null = null;
-    let oldest = Infinity;
-    for (const [k, v] of sessions) {
-      if (v.lastUsed < oldest) {
-        oldest = v.lastUsed;
-        oldestKey = k;
-      }
-    }
-    if (!oldestKey) break;
-    const victim = sessions.get(oldestKey);
-    sessions.delete(oldestKey);
-    void victim?.transport.close().catch(() => {});
-  }
-}
-
-async function handleMcp(request: Request): Promise<Response> {
+export async function POST(request: Request): Promise<Response> {
   // مصادقة اختيارية على /mcp
   const token = process.env.MCP_ACCESS_TOKEN;
   if (token) {
@@ -91,80 +80,21 @@ async function handleMcp(request: Request): Promise<Response> {
       return jsonError(401, -32001, "Unauthorized: Authorization: Bearer <MCP_ACCESS_TOKEN> مطلوب");
     }
   }
+  return handlePost(request);
+}
 
-  const sessionId = request.headers.get("mcp-session-id");
-
-  if (request.method === "POST") {
-    // فحص الأداة المجهولة قبل تمرير الجسم للـ transport — رسالة عربية صريحة بدل خطأ إنجليزي
-    try {
-      const peek = (await request.clone().json()) as {
-        method?: string;
-        id?: unknown;
-        params?: { name?: string };
-      };
-      if (peek?.method === "tools/call" && !TOOL_NAMES.includes(peek.params?.name ?? "")) {
-        const name = peek.params?.name ?? "(فارغ)";
-        const body = JSON.stringify({
-          jsonrpc: "2.0",
-          id: peek.id ?? null,
-          result: {
-            content: [{ type: "text", text: `❌ أداة غير معروفة: ${name}. المتاح: ${TOOL_NAMES.join("، ")}` }],
-            isError: true,
-          },
-        });
-        return new Response(body, {
-          status: 200,
-          headers: {
-            "Content-Type": "application/json",
-            ...(sessionId ? { "mcp-session-id": sessionId } : {}),
-          },
-        });
-      }
-    } catch {
-      /* ليس JSON أو تعذر القراءة — الـ transport سيتعامل معه */
-    }
-
-    if (sessionId) {
-      const pair = sessions.get(sessionId);
-      if (!pair) {
-        // معرّف جلسة غير معروف (انتهى أو من عملية أخرى) → 404 حسب المواصفة
-        return jsonError(404, -32001, "Session not found");
-      }
-      pair.lastUsed = Date.now();
-      return pair.transport.handleRequest(request);
-    }
-    // بلا جلسة: initialize جديد
-    const pair = createSession();
-    const response = await pair.transport.handleRequest(request);
-    evictIfNeeded();
-    return response;
-  }
-
-  // GET (بث SSE مستقل) و DELETE (إنهاء الجلسة) يتطلبان جلسة قائمة
-  if (sessionId) {
-    const pair = sessions.get(sessionId);
-    if (pair) {
-      pair.lastUsed = Date.now();
-      return pair.transport.handleRequest(request);
-    }
-    return jsonError(404, -32001, "Session not found");
-  }
-  // حسب المواصفة: GET بلا جلسة → 405
+/** GET غير مدعوم في وضع stateless — لا بث مستقل من السيرفر */
+export async function GET(): Promise<Response> {
   return jsonError(
-    request.method === "GET" ? 405 : 400,
+    405,
     -32001,
-    request.method === "GET" ? "Method Not Allowed: session id مطلوب" : "Bad Request: session id مطلوب"
+    "Method Not Allowed: وضع stateless لا يوفر بث SSE مستقل — النتائج والتقدم يعودان ضمن استجابة POST مباشرة"
   );
 }
 
-export async function POST(request: Request): Promise<Response> {
-  return handleMcp(request);
-}
-export async function GET(request: Request): Promise<Response> {
-  return handleMcp(request);
-}
-export async function DELETE(request: Request): Promise<Response> {
-  return handleMcp(request);
+/** DELETE غير مدعوم في وضع stateless — لا توجد جلسات تُنهى */
+export async function DELETE(): Promise<Response> {
+  return jsonError(405, -32001, "Method Not Allowed: وضع stateless بلا جلسات — لا حاجة لإنهاء جلسة");
 }
 
 /** CORS للعملاء القائمين على المتصفح — لا يحتاجه العملاء الخادمية لكنه لا يضر */
